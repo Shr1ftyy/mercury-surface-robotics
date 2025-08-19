@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dyson Swarm — Mercury Foundry</title>
+    <style>
+      /*
+        Accents provided looked truncated; assuming:
+        - orange: #FF3300
+        - green:  #33FF00
+      */
+      :root {
+        --accent-orange: #ff3300;
+        --accent-green: #33ff00;
+        --bg: #000000;
+        --fg: #e6e6e6;
+        --muted: #888888;
+      }
+
+      html, body {
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji, Segoe UI Symbol;
+        overflow: hidden;
+      }
+
+      .wrap {
+        position: fixed;
+        inset: 0;
+      }
+
+      canvas#scene {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        background: radial-gradient(1200px 1200px at 50% 50%, #050505 0%, #000 60%);
+      }
+
+      .hud {
+        position: absolute;
+        top: 16px;
+        left: 16px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        user-select: none;
+        pointer-events: none;
+      }
+
+      .badge {
+        pointer-events: auto;
+        background: rgba(0,0,0,0.5);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        padding: 10px 12px;
+        backdrop-filter: blur(6px);
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.02) inset, 0 8px 24px rgba(0,0,0,0.35);
+      }
+
+      .title {
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        color: var(--accent-orange);
+      }
+
+      .stats { font-size: 13px; line-height: 1.35; }
+      .stats b { color: var(--accent-green); font-weight: 700; }
+      .muted { color: var(--muted); }
+
+      .controls {
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        display: flex;
+        gap: 8px;
+      }
+
+      .btn {
+        appearance: none;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+        color: var(--fg);
+        border-radius: 10px;
+        padding: 8px 12px;
+        font-size: 13px;
+        cursor: pointer;
+        transition: transform 120ms ease, border-color 120ms ease;
+      }
+      .btn:hover { border-color: var(--accent-green); transform: translateY(-1px); }
+      .btn:active { transform: translateY(0); }
+
+      .panel {
+        position: absolute;
+        right: 16px;
+        bottom: 16px;
+        width: min(380px, 40vw);
+        height: min(220px, 28vh);
+        background: rgba(0,0,0,0.45);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+      }
+
+      .panel .panel-title {
+        font-size: 12px;
+        letter-spacing: 0.3px;
+        padding: 8px 10px;
+        background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+        color: var(--accent-orange);
+      }
+
+      .panel canvas {
+        display: block;
+        width: 100%;
+        height: calc(100% - 31px);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <canvas id="scene"></canvas>
+      <div class="hud">
+        <div class="badge title">Dyson Swarm — Mercury Foundry</div>
+        <div class="badge stats" id="stats"></div>
+      </div>
+      <div class="controls">
+        <button class="btn" id="toggle">Pause</button>
+        <button class="btn" id="quality">Quality: Auto</button>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Mercury Surface Robotics</div>
+        <canvas id="foundry"></canvas>
+      </div>
+    </div>
+
+    <script>
+      // -------------------------------------------------------------
+      // Lightweight 3D-like Dyson swarm visualization (Canvas 2D)
+      // -------------------------------------------------------------
+      (function() {
+        'use strict';
+
+        // Color configuration (assumption on provided hex codes)
+        const COLOR_ORANGE = getComputedStyle(document.documentElement).getPropertyValue('--accent-orange').trim() || '#ff3300';
+        const COLOR_GREEN  = getComputedStyle(document.documentElement).getPropertyValue('--accent-green').trim() || '#33ff00';
+
+        // Main canvas setup
+        const canvas = document.getElementById('scene');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const statsEl = document.getElementById('stats');
+        const toggleBtn = document.getElementById('toggle');
+        const qualityBtn = document.getElementById('quality');
+
+        // Foundry (Mercury surface) panel
+        const foundryCanvas = document.getElementById('foundry');
+        const foundryCtx = foundryCanvas.getContext('2d');
+
+        // Resolution management for efficiency
+        let useAutoQuality = true;
+        let deviceScale = Math.min(window.devicePixelRatio || 1, 1.75);
+        let lowPowerScale = 1;
+
+        function resize() {
+          const dpr = (useAutoQuality ? deviceScale : lowPowerScale);
+          const { innerWidth: w, innerHeight: h } = window;
+          canvas.width = Math.floor(w * dpr);
+          canvas.height = Math.floor(h * dpr);
+          canvas.style.width = w + 'px';
+          canvas.style.height = h + 'px';
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+          // Foundry panel size mirrors CSS; recompute drawing scale
+          const panel = foundryCanvas.parentElement.getBoundingClientRect();
+          const fh = Math.max(80, panel.height - 31);
+          const fw = Math.max(120, panel.width);
+          const fdpr = (useAutoQuality ? Math.min(dpr, 1.5) : 1);
+          foundryCanvas.width = Math.floor(fw * fdpr);
+          foundryCanvas.height = Math.floor(fh * fdpr);
+          foundryCanvas.style.width = fw + 'px';
+          foundryCanvas.style.height = fh + 'px';
+          foundryCtx.setTransform(fdpr, 0, 0, fdpr, 0, 0);
+        }
+
+        window.addEventListener('resize', resize);
+
+        // Scene parameters (scaled to fit view)
+        const scene = {
+          cameraZ: 1400,
+          focalLength: 900,
+          worldRotationY: 0.18, // fixed viewing yaw for depth, not animated
+          worldRotationYSpeed: 0, // keep orientation stable (no oscillation)
+          worldRotationX: 0.28, // fixed tilt for parallax
+          worldRotationXSpeed: 0, // keep orientation stable (no oscillation)
+          sunRadius: 30,
+          mercuryOrbitRadius: 220,
+          mercuryRadius: 8,
+          swarmMinRadius: 100,
+          swarmMaxRadius: 200,
+          swarmCountCap: 2000,
+          initialSwarm: 1000,
+        };
+
+        // --- Swarm structural constants ---
+        const ORBIT_INC_COUNT = 3;     // number of inclination layers (planes in latitude)
+        const ORBIT_RAAN_COUNT = 3;   // number of RAAN slices (planes in longitude)
+        const BAND_COUNT = 3;          // number of radial bands between min/max radius
+        const SLOTS_PER_BAND = 32;     // number of angular slots per band on every plane
+
+        // Organized grid of planes using (inclination, RAAN) like a Walker constellation
+        const ringPlanes = (function buildWalkerPlanes() {
+          const planes = [];
+          const incMax = 1.15; // ~66 degrees
+          for (let i = 0; i < ORBIT_INC_COUNT; i++) {
+            const t = (ORBIT_INC_COUNT === 1) ? 0.5 : (i / (ORBIT_INC_COUNT - 1));
+            const inc = -incMax + 2 * incMax * t; // symmetric around 0
+            for (let j = 0; j < ORBIT_RAAN_COUNT; j++) {
+              const raan = (j / ORBIT_RAAN_COUNT) * Math.PI * 2;
+              // Compute plane normal and orthonormal basis (u, v)
+              // Start with ecliptic normal (0,1,0), rotate by inc around X, then by raan around Y
+              const cosI = Math.cos(inc), sinI = Math.sin(inc);
+              const cosO = Math.cos(raan), sinO = Math.sin(raan);
+              const nx = sinI * sinO;
+              const ny = cosI;
+              const nz = sinI * cosO;
+              const nLen = Math.hypot(nx, ny, nz) || 1;
+              const n = { x: nx / nLen, y: ny / nLen, z: nz / nLen };
+              // Choose a reference not parallel to n to build basis
+              const ref = Math.abs(n.y) > 0.85 ? { x: 1, y: 0, z: 0 } : { x: 0, y: 1, z: 0 };
+              let ux = ref.y * n.z - ref.z * n.y;
+              let uy = ref.z * n.x - ref.x * n.z;
+              let uz = ref.x * n.y - ref.y * n.x;
+              const uLen = Math.hypot(ux, uy, uz) || 1;
+              ux /= uLen; uy /= uLen; uz /= uLen;
+              // v = n x u
+              const vx = n.y * uz - n.z * uy;
+              const vy = n.z * ux - n.x * uz;
+              const vz = n.x * uy - n.y * ux;
+              const vLen = Math.hypot(vx, vy, vz) || 1;
+              const u = { x: ux, y: uy, z: uz };
+              const v = { x: vx / vLen, y: vy / vLen, z: vz / vLen };
+
+              planes.push({ inc, raan, n, u, v });
+            }
+          }
+          return planes;
+        })();
+
+        const ringRadii = (function() {
+          const bands = [];
+          for (let i = 0; i < BAND_COUNT; i++) {
+            const t = i / Math.max(1, BAND_COUNT - 1);
+            const r = scene.swarmMinRadius * (1 - t) + scene.swarmMaxRadius * t;
+            bands.push(r);
+          }
+          return bands;
+        })();
+
+        // Organized layout helpers: angular slots per band and per-plane-band cursors
+        const PLANE_COUNT = ringPlanes.length;
+        const slotsPerBand = ringRadii.map(() => SLOTS_PER_BAND); // fixed slots -> clean array
+        // Deterministic phases aligned to zero for lattice symmetry
+        const TAU = Math.PI * 2;
+        const planeBandPhase = Array.from({ length: PLANE_COUNT }, () => (
+          Array.from({ length: BAND_COUNT }, () => 0)
+        ));
+        const planeBandCursor = Array.from({ length: PLANE_COUNT }, () => (
+          new Array(BAND_COUNT).fill(0)
+        ));
+        let spawnCounter = 0;
+
+        // Particles (reflectors)
+        const reflectors = [];
+        const maxReflectors = scene.swarmCountCap;
+        const spawnQueue = [];
+        // Transfer beams from Mercury to newly deployed reflectors (main scene)
+        const transferBeams = [];
+        const MAX_BEAMS = 64;
+        // Global swarm angle for in-unison motion
+        let swarmTheta = 0;
+        const SWARM_ANG_SPEED = 0.0012;
+
+        // Pre-allocate arrays for tight loop perf
+        function createReflector(seed) {
+          // Evenly distribute across plane/band grid
+          const planeIndex = spawnCounter % PLANE_COUNT;
+          const bandIndex = Math.floor(spawnCounter / PLANE_COUNT) % BAND_COUNT;
+          spawnCounter++;
+
+          const baseR = ringRadii[bandIndex];
+          const r = baseR; // snap to band radius for strict ring organization
+          const slots = slotsPerBand[bandIndex];
+          const phase = planeBandPhase[planeIndex][bandIndex];
+          const k = planeBandCursor[planeIndex][bandIndex]++;
+          const slotAngle = phase + (k % slots) * (TAU / slots);
+          const size = 1;
+          return { r, slotAngle, angle: slotAngle, planeIndex, bandIndex, size, x:0, y:0, z:0 };
+        }
+
+        function seedInitialSwarm() {
+          for (let i = 0; i < scene.initialSwarm; i++) {
+            reflectors.push(createReflector(i));
+          }
+        }
+
+        // Mercury and robots on surface
+        const robots = [];
+        const robotCount = 8;
+        for (let i = 0; i < robotCount; i++) {
+          robots.push({ angle: (i / robotCount) * Math.PI * 2, speed: rand(0.0008, 0.0016), cooldown: rand(0.5, 3.5) });
+        }
+
+        let mercuryAngle = 0;
+        const mercuryAngularSpeed = 0.00035; // relative
+
+        // Foundry launch animation state
+        const activeLaunches = [];
+
+        // Utility
+        function rand(min, max) { return min + Math.random() * (max - min); }
+
+        function rotateX(p, angle) {
+          const s = Math.sin(angle), c = Math.cos(angle);
+          const y = p.y * c - p.z * s;
+          const z = p.y * s + p.z * c;
+          p.y = y; p.z = z;
+          return p;
+        }
+        function rotateY(p, angle) {
+          const s = Math.sin(angle), c = Math.cos(angle);
+          const x = p.x * c + p.z * s;
+          const z = -p.x * s + p.z * c;
+          p.x = x; p.z = z;
+          return p;
+        }
+        function projectPoint(p, width, height) {
+          const zc = p.z + scene.cameraZ;
+          const scale = scene.focalLength / zc;
+          return {
+            x: p.x * scale + width * 0.5,
+            y: p.y * scale + height * 0.5,
+            scale
+          };
+        }
+
+        // World-space helpers
+        function getMercuryWorldPosition() {
+          let px = scene.mercuryOrbitRadius * Math.cos(mercuryAngle);
+          let py = 0;
+          let pz = scene.mercuryOrbitRadius * Math.sin(mercuryAngle);
+          const p = { x: px, y: py, z: pz };
+          rotateX(p, scene.worldRotationX);
+          rotateY(p, scene.worldRotationY);
+          return p;
+        }
+
+        function getReflectorWorldPosition(rf, theta) {
+          const a = rf.slotAngle + theta;
+          const ca = Math.cos(a), sa = Math.sin(a);
+          const plane = ringPlanes[rf.planeIndex];
+          let px = rf.r * (plane.u.x * ca + plane.v.x * sa);
+          let py = rf.r * (plane.u.y * ca + plane.v.y * sa);
+          let pz = rf.r * (plane.u.z * ca + plane.v.z * sa);
+          const p = { x: px, y: py, z: pz };
+          rotateX(p, scene.worldRotationX);
+          rotateY(p, scene.worldRotationY);
+          return p;
+        }
+
+        function createTransferBeam(rf) {
+          const s = getMercuryWorldPosition();
+          const e = getReflectorWorldPosition(rf, swarmTheta);
+          transferBeams.push({ rf, sx: s.x, sy: s.y, sz: s.z, ex: e.x, ey: e.y, ez: e.z, t: 0, dur: 1200 + Math.random() * 600 });
+          if (transferBeams.length > MAX_BEAMS) transferBeams.shift();
+        }
+
+        // Performance adaptation
+        let lastFrameTime = performance.now();
+        let fpsSmoothed = 60;
+        const fpsSmoothing = 0.05;
+
+        function updateQuality(deltaMs) {
+          const fps = 1000 / Math.max(1, deltaMs);
+          fpsSmoothed = fpsSmoothed * (1 - fpsSmoothing) + fps * fpsSmoothing;
+          if (!useAutoQuality) return; // manual override
+
+          // If FPS drops, reduce effective resolution scale for next resize
+          const prevScale = deviceScale;
+          if (fpsSmoothed < 42 && deviceScale > 1.0) {
+            deviceScale = Math.max(0.85, deviceScale - 0.1);
+            resize();
+          } else if (fpsSmoothed > 57 && deviceScale < (window.devicePixelRatio || 1)) {
+            deviceScale = Math.min(window.devicePixelRatio || 1, deviceScale + 0.1);
+            if (deviceScale !== prevScale) resize();
+          }
+        }
+
+        // Drawing helpers
+        function drawSun(width, height) {
+          const cx = width * 0.5, cy = height * 0.5;
+          const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, scene.sunRadius * 7);
+          gradient.addColorStop(0, COLOR_ORANGE);
+          gradient.addColorStop(0.15, '#aa2200');
+          gradient.addColorStop(0.35, 'rgba(255,120,0,0.25)');
+          gradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+          ctx.save();
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = gradient;
+          ctx.beginPath();
+          ctx.arc(cx, cy, scene.sunRadius * 7, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Solar core
+          ctx.fillStyle = '#ffb200';
+          ctx.beginPath();
+          ctx.arc(cx, cy, scene.sunRadius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
+        function drawOrbitHint(width, height, radius, color, alpha) {
+          // Draw a faint ellipse to hint Mercury's orbit (projected circle)
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1;
+          const cx = width * 0.5, cy = height * 0.5;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, radius, radius * 0.35, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        function updateReflectors(delta) {
+          swarmTheta += SWARM_ANG_SPEED * delta; // shared angular progress for all reflectors
+          for (let i = 0; i < reflectors.length; i++) {
+            const rf = reflectors[i];
+            // Position on orbital plane: p = r*(cos(a)*u + sin(a)*v)
+            const a = rf.slotAngle + swarmTheta;
+            const ca = Math.cos(a), sa = Math.sin(a);
+            const plane = ringPlanes[rf.planeIndex];
+            let px = rf.r * (plane.u.x * ca + plane.v.x * sa);
+            let py = rf.r * (plane.u.y * ca + plane.v.y * sa);
+            let pz = rf.r * (plane.u.z * ca + plane.v.z * sa);
+            const p = { x: px, y: py, z: pz };
+            // Apply fixed global view rotation only
+            rotateX(p, scene.worldRotationX);
+            rotateY(p, scene.worldRotationY);
+            rf.angle = a;
+            rf.x = p.x; rf.y = p.y; rf.z = p.z;
+          }
+        }
+
+        function drawReflectorsPass(width, height, isBackHalf) {
+          ctx.save();
+          const count = reflectors.length;
+          for (let i = 0; i < count; i++) {
+            const rf = reflectors[i];
+            if ((rf.z < 0) !== isBackHalf) continue;
+            renderReflector(rf, width, height, isBackHalf);
+          }
+          ctx.restore();
+        }
+
+        function renderReflector(rf, width, height, isBackHalf) {
+          const proj = projectPoint(rf, width, height);
+          // Occlude back-half particles inside the stellar glow radius to prevent halo flicker
+          if (isBackHalf) {
+            const cx = width * 0.5, cy = height * 0.5;
+            const glowR = scene.sunRadius * 7.2;
+            const dx = proj.x - cx;
+            const dy = proj.y - cy;
+            if (dx * dx + dy * dy < glowR * glowR) return;
+          }
+          // Depth-based alpha for subtle atmospheric fade
+          const depthAlpha = Math.min(1, Math.max(0.1, 0.48 + (rf.z / (scene.swarmMaxRadius * 2))));
+          ctx.globalAlpha = depthAlpha;
+
+          // Brightness based on orbital radius (closer => brighter)
+          const t = (rf.r - scene.swarmMinRadius) / Math.max(1, (scene.swarmMaxRadius - scene.swarmMinRadius));
+          const brightness = Math.max(0.35, 1.0 - 0.6 * t);
+          const g = Math.floor(210 * brightness + 25); // 25..235
+          ctx.fillStyle = `rgb(${g},${g},${g})`;
+
+          const s = Math.max(0.5, rf.size * (0.6 + proj.scale * 0.8));
+          // Draw a tiny diamond to suggest specular facet
+          ctx.save();
+          ctx.translate(proj.x, proj.y);
+          ctx.rotate((rf.angle + rf.r * 0.0003) % (Math.PI * 2));
+          ctx.beginPath();
+          ctx.moveTo(0, -s);
+          ctx.lineTo(s, 0);
+          ctx.lineTo(0, s);
+          ctx.lineTo(-s, 0);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+
+        function updateBeams(delta) {
+          // Update beam lifetimes and endpoints (follow moving target)
+          for (let i = transferBeams.length - 1; i >= 0; i--) {
+            const b = transferBeams[i];
+            b.t += delta;
+            if (b.t > b.dur) { transferBeams.splice(i, 1); continue; }
+          }
+          // Refresh start/end positions to current Mercury and reflector positions
+          const sNow = getMercuryWorldPosition();
+          for (let i = 0; i < transferBeams.length; i++) {
+            const b = transferBeams[i];
+            b.sx = sNow.x; b.sy = sNow.y; b.sz = sNow.z;
+            if (b.rf) {
+              const eNow = getReflectorWorldPosition(b.rf, swarmTheta);
+              b.ex = eNow.x; b.ey = eNow.y; b.ez = eNow.z;
+            }
+          }
+        }
+
+        function drawBeams(width, height, isBackHalf) {
+          if (!transferBeams.length) return;
+          const cx = width * 0.5, cy = height * 0.5;
+          for (let i = 0; i < transferBeams.length; i++) {
+            const b = transferBeams[i];
+            const s = projectPoint({ x: b.sx, y: b.sy, z: b.sz }, width, height);
+            const e = projectPoint({ x: b.ex, y: b.ey, z: b.ez }, width, height);
+            const back = (b.sz + b.ez) * 0.5 < 0; // approximate z sign
+            if (back !== isBackHalf) continue;
+            // Skip if inside star glow (behind pass)
+            if (isBackHalf) {
+              const glowR = scene.sunRadius * 7.2;
+              const dx = (s.x + e.x) * 0.5 - cx;
+              const dy = (s.y + e.y) * 0.5 - cy;
+              if (dx * dx + dy * dy < glowR * glowR) continue;
+            }
+            const life = Math.min(1, Math.max(0, 1 - b.t / b.dur));
+            ctx.save();
+            ctx.globalAlpha = 0.4 * life + 0.2;
+            const grad = ctx.createLinearGradient(s.x, s.y, e.x, e.y);
+            grad.addColorStop(0, 'rgba(255,255,255,0)');
+            grad.addColorStop(0.2, 'rgba(255,255,255,0.6)');
+            grad.addColorStop(1, 'rgba(180,180,180,0.0)');
+            ctx.strokeStyle = grad;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(s.x, s.y);
+            ctx.lineTo(e.x, e.y);
+            ctx.stroke();
+            // Tip sparkle
+            ctx.fillStyle = 'rgba(255,255,255,' + (0.5 * life + 0.2) + ')';
+            ctx.beginPath();
+            ctx.arc(e.x, e.y, 1.6, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        }
+
+        function updateMercury(delta) {
+          mercuryAngle += mercuryAngularSpeed * delta;
+        }
+
+        function drawMercury(width, height) {
+          // Position in ecliptic, slight world rotation for coherence
+          let px = scene.mercuryOrbitRadius * Math.cos(mercuryAngle);
+          let py = 0;
+          let pz = scene.mercuryOrbitRadius * Math.sin(mercuryAngle);
+          const p = { x: px, y: py, z: pz };
+          rotateX(p, scene.worldRotationX);
+          rotateY(p, scene.worldRotationY);
+          const proj = projectPoint(p, width, height);
+
+          // Draw small planet with ring highlight
+          const r = Math.max(2, scene.mercuryRadius * (0.8 + proj.scale * 0.7));
+          ctx.save();
+          ctx.globalAlpha = 1;
+          ctx.beginPath();
+          ctx.fillStyle = '#9ea2a6';
+          ctx.arc(proj.x, proj.y, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 0.65;
+          ctx.strokeStyle = COLOR_GREEN;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(proj.x, proj.y, r + 2, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        function drawSwarmDiskHint(width, height) {
+          // Faint elliptical band indicating the swarm disk thickness
+          ctx.save();
+          const cx = width * 0.5, cy = height * 0.5;
+          const outer = scene.swarmMaxRadius;
+          const inner = scene.swarmMinRadius * 0.96;
+          // Outer ring
+          ctx.globalAlpha = 0.08;
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, outer, outer * 0.35, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          // Inner ring
+          ctx.globalAlpha = 0.06;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, inner, inner * 0.35, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // Foundry (Mercury surface) mini-sim
+        function updateFoundry(delta) {
+          for (let i = 0; i < robots.length; i++) {
+            const rb = robots[i];
+            rb.angle += rb.speed * delta;
+            rb.cooldown -= delta * 0.001;
+            if (rb.cooldown <= 0) {
+              // Queue a launch animation and a reflector spawn
+              triggerLaunch(rb.angle);
+              queueReflectorSpawn();
+              rb.cooldown = rand(1.2, 4.0);
+            }
+          }
+          // Update launch animations
+          for (let i = activeLaunches.length - 1; i >= 0; i--) {
+            const l = activeLaunches[i];
+            l.t += delta * 0.0035; // progress
+            if (l.t >= 1) activeLaunches.splice(i, 1);
+          }
+        }
+
+        function triggerLaunch(angle) {
+          activeLaunches.push({ angle, t: 0 });
+        }
+
+        function queueReflectorSpawn() {
+          if (reflectors.length + spawnQueue.length >= maxReflectors) return;
+          const rf = createReflector(reflectors.length + spawnQueue.length);
+          spawnQueue.push(rf);
+          // Also create a visual transfer beam from Mercury
+          createTransferBeam(rf);
+        }
+
+        function commitSpawns(limitPerFrame = 8) {
+          let added = 0;
+          while (spawnQueue.length && added < limitPerFrame) {
+            reflectors.push(spawnQueue.shift());
+            added++;
+          }
+        }
+
+        function drawFoundryPanel() {
+          // Draw using CSS pixel dimensions; resolution scaling handled by context transform
+          const w = foundryCanvas.clientWidth;
+          const h = foundryCanvas.clientHeight;
+          const ctx2 = foundryCtx;
+          ctx2.clearRect(0, 0, w, h);
+
+          // Panel background grid
+          ctx2.save();
+          ctx2.globalAlpha = 0.12;
+          ctx2.strokeStyle = '#ffffff';
+          ctx2.lineWidth = 1;
+          ctx2.beginPath();
+          for (let x = 16; x < w; x += 24) { ctx2.moveTo(x, 0); ctx2.lineTo(x, h); }
+          for (let y = 8; y < h; y += 24) { ctx2.moveTo(0, y); ctx2.lineTo(w, y); }
+          ctx2.stroke();
+          ctx2.restore();
+
+          const cx = w * 0.36;
+          const cy = h * 0.58;
+          const R = Math.min(w, h) * 0.34;
+
+          // Mercury disc
+          ctx2.save();
+          ctx2.fillStyle = '#8d9196';
+          ctx2.beginPath();
+          ctx2.arc(cx, cy, R, 0, Math.PI * 2);
+          ctx2.fill();
+          ctx2.strokeStyle = 'rgba(255,255,255,0.2)';
+          ctx2.stroke();
+
+          // Robots and tracks
+          ctx2.strokeStyle = 'rgba(0,0,0,0.25)';
+          ctx2.lineWidth = 2;
+          ctx2.beginPath();
+          ctx2.arc(cx, cy, R * 0.65, 0, Math.PI * 2);
+          ctx2.stroke();
+
+          for (let i = 0; i < robots.length; i++) {
+            const rb = robots[i];
+            const ra = R * 0.65;
+            const rx = cx + ra * Math.cos(rb.angle);
+            const ry = cy + ra * Math.sin(rb.angle);
+            ctx2.fillStyle = COLOR_GREEN;
+            ctx2.beginPath();
+            ctx2.arc(rx, ry, 4, 0, Math.PI * 2);
+            ctx2.fill();
+          }
+          ctx2.restore();
+
+          // Launch tracers
+          for (let i = 0; i < activeLaunches.length; i++) {
+            const l = activeLaunches[i];
+            const ra = R * 0.8;
+            const sx = cx + ra * Math.cos(l.angle);
+            const sy = cy + ra * Math.sin(l.angle);
+            const ex = cx + (R + 18 + 60 * l.t) * Math.cos(l.angle);
+            const ey = cy + (R + 18 + 60 * l.t) * Math.sin(l.angle);
+            const alpha = 1 - l.t;
+            ctx2.strokeStyle = COLOR_ORANGE;
+            ctx2.globalAlpha = alpha * 0.9;
+            ctx2.lineWidth = 2;
+            ctx2.beginPath();
+            ctx2.moveTo(sx, sy);
+            ctx2.lineTo(ex, ey);
+            ctx2.stroke();
+          }
+
+          // Right side textual readouts
+          const textX = Math.max(cx + R + 24, w * 0.62);
+          ctx2.globalAlpha = 1;
+          ctx2.fillStyle = '#ffffff';
+          ctx2.font = '600 14px ui-sans-serif, system-ui, -apple-system';
+          ctx2.fillText('Robots Active', textX, 26);
+          ctx2.fillStyle = COLOR_GREEN;
+          ctx2.font = '700 20px ui-sans-serif, system-ui, -apple-system';
+          ctx2.fillText(String(robots.length), textX, 50);
+
+          ctx2.fillStyle = '#ffffff';
+          ctx2.font = '600 14px ui-sans-serif, system-ui, -apple-system';
+          ctx2.fillText('Launch Queue', textX, 82);
+          ctx2.fillStyle = COLOR_ORANGE;
+          ctx2.font = '700 20px ui-sans-serif, system-ui, -apple-system';
+          ctx2.fillText(String(spawnQueue.length), textX, 106);
+
+          ctx2.fillStyle = '#ffffff';
+          ctx2.font = '600 14px ui-sans-serif, system-ui, -apple-system';
+          ctx2.fillText('Swarm Reflectors', textX, 138);
+          ctx2.fillStyle = COLOR_GREEN;
+          ctx2.font = '700 20px ui-sans-serif, system-ui, -apple-system';
+          ctx2.fillText(String(reflectors.length), textX, 162);
+        }
+
+        // Main loop
+        let running = true;
+
+        function frame(now) {
+          if (!running) return; // paused
+          const width = canvas.clientWidth;
+          const height = canvas.clientHeight;
+          const dt = Math.min(34, now - lastFrameTime);
+          lastFrameTime = now;
+
+          updateQuality(dt);
+          // Keep global orientation fixed to avoid oscillation into a ring
+          if (scene.worldRotationYSpeed) scene.worldRotationY += scene.worldRotationYSpeed * dt;
+          if (scene.worldRotationXSpeed) scene.worldRotationX += scene.worldRotationXSpeed * dt;
+          updateReflectors(dt);
+          updateMercury(dt);
+          updateFoundry(dt);
+          commitSpawns(6); // limit additions per frame for perf
+          updateBeams(dt);
+
+          // Draw background
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(0, 0, width, height);
+
+          // Draw far half of the swarm behind the star
+          drawReflectorsPass(width, height, true);
+          drawBeams(width, height, true);
+          // Draw star and hints
+          drawSun(width, height);
+          drawOrbitHint(width, height, scene.mercuryOrbitRadius, 'rgba(255,255,255,0.14)', 0.6);
+          // Draw near half of the swarm in front
+          drawReflectorsPass(width, height, false);
+          drawBeams(width, height, false);
+          drawMercury(width, height);
+
+          // HUD stats
+          statsEl.innerHTML = `
+            <div><span class="muted">Reflectors:</span> <b>${reflectors.length.toLocaleString()}</b></div>
+            <div><span class="muted">Queue:</span> <b>${spawnQueue.length}</b></div>
+            <div><span class="muted">FPS:</span> <b>${Math.round(fpsSmoothed)}</b></div>
+          `;
+
+          drawFoundryPanel();
+
+          requestAnimationFrame(frame);
+        }
+
+        // Controls
+        toggleBtn.addEventListener('click', function() {
+          running = !running;
+          toggleBtn.textContent = running ? 'Pause' : 'Resume';
+          if (running) {
+            lastFrameTime = performance.now();
+            requestAnimationFrame(frame);
+          }
+        });
+
+        qualityBtn.addEventListener('click', function() {
+          useAutoQuality = !useAutoQuality;
+          qualityBtn.textContent = 'Quality: ' + (useAutoQuality ? 'Auto' : 'Fixed');
+          if (!useAutoQuality) {
+            deviceScale = Math.min(window.devicePixelRatio || 1, 1.25);
+          }
+          resize();
+        });
+
+        // Init
+        resize();
+        seedInitialSwarm();
+        lastFrameTime = performance.now();
+        requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
+
+
