@@ -193,17 +193,17 @@
 
         // Scene parameters (scaled to fit view)
         const scene = {
-          cameraZ: 1400,
-          focalLength: 900,
+          cameraZ: 800,
+          focalLength: 1400,
           worldRotationY: 0.18, // fixed viewing yaw for depth, not animated
           worldRotationYSpeed: 0, // keep orientation stable (no oscillation)
           worldRotationX: 0.28, // fixed tilt for parallax
           worldRotationXSpeed: 0, // keep orientation stable (no oscillation)
           sunRadius: 30,
-          mercuryOrbitRadius: 220,
-          mercuryRadius: 8,
-          swarmMinRadius: 100,
-          swarmMaxRadius: 200,
+          mercuryOrbitRadius: 250,
+          mercuryRadius: 3,
+          swarmMinRadius: 50,
+          swarmMaxRadius: 150,
           swarmCountCap: 2000,
           initialSwarm: 1000,
         };
@@ -282,7 +282,8 @@
         const spawnQueue = [];
         // Transfer beams from Mercury to newly deployed reflectors (main scene)
         const transferBeams = [];
-        const MAX_BEAMS = 64;
+        const scheduledBeams = [];
+        const MAX_BEAMS = 128;
         // Global swarm angle for in-unison motion
         let swarmTheta = 0;
         const SWARM_ANG_SPEED = 0.0012;
@@ -350,6 +351,10 @@
           };
         }
 
+        function projectionScaleAtZ(z) {
+          return scene.focalLength / (z + scene.cameraZ);
+        }
+
         // World-space helpers
         function getMercuryWorldPosition() {
           let px = scene.mercuryOrbitRadius * Math.cos(mercuryAngle);
@@ -381,6 +386,10 @@
           if (transferBeams.length > MAX_BEAMS) transferBeams.shift();
         }
 
+        function scheduleBeamToReflector(rf, delayMs) {
+          scheduledBeams.push({ rf, delay: delayMs });
+        }
+
         // Performance adaptation
         let lastFrameTime = performance.now();
         let fpsSmoothed = 60;
@@ -405,7 +414,10 @@
         // Drawing helpers
         function drawSun(width, height) {
           const cx = width * 0.5, cy = height * 0.5;
-          const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, scene.sunRadius * 7);
+          const s0 = projectionScaleAtZ(0);
+          const glowPx = scene.sunRadius * 7 * s0;
+          const corePx = scene.sunRadius * s0;
+          const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowPx);
           gradient.addColorStop(0, COLOR_ORANGE);
           gradient.addColorStop(0.15, '#aa2200');
           gradient.addColorStop(0.35, 'rgba(255,120,0,0.25)');
@@ -415,13 +427,13 @@
           ctx.globalAlpha = 1;
           ctx.fillStyle = gradient;
           ctx.beginPath();
-          ctx.arc(cx, cy, scene.sunRadius * 7, 0, Math.PI * 2);
+          ctx.arc(cx, cy, glowPx, 0, Math.PI * 2);
           ctx.fill();
 
           // Solar core
           ctx.fillStyle = '#ffb200';
           ctx.beginPath();
-          ctx.arc(cx, cy, scene.sunRadius, 0, Math.PI * 2);
+          ctx.arc(cx, cy, corePx, 0, Math.PI * 2);
           ctx.fill();
           ctx.restore();
         }
@@ -433,8 +445,11 @@
           ctx.strokeStyle = color;
           ctx.lineWidth = 1;
           const cx = width * 0.5, cy = height * 0.5;
+          const s0 = projectionScaleAtZ(0);
+          const rx = radius * s0;
+          const ry = rx * Math.max(0.05, Math.cos(scene.worldRotationX));
           ctx.beginPath();
-          ctx.ellipse(cx, cy, radius, radius * 0.35, 0, 0, Math.PI * 2);
+          ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
           ctx.stroke();
           ctx.restore();
         }
@@ -475,7 +490,7 @@
           // Occlude back-half particles inside the stellar glow radius to prevent halo flicker
           if (isBackHalf) {
             const cx = width * 0.5, cy = height * 0.5;
-            const glowR = scene.sunRadius * 7.2;
+            const glowR = scene.sunRadius * 7.2 * projectionScaleAtZ(0);
             const dx = proj.x - cx;
             const dy = proj.y - cy;
             if (dx * dx + dy * dy < glowR * glowR) return;
@@ -511,6 +526,15 @@
             const b = transferBeams[i];
             b.t += delta;
             if (b.t > b.dur) { transferBeams.splice(i, 1); continue; }
+          }
+          // Release scheduled beams
+          for (let i = scheduledBeams.length - 1; i >= 0; i--) {
+            const s = scheduledBeams[i];
+            s.delay -= delta;
+            if (s.delay <= 0) {
+              createTransferBeam(s.rf);
+              scheduledBeams.splice(i, 1);
+            }
           }
           // Refresh start/end positions to current Mercury and reflector positions
           const sNow = getMercuryWorldPosition();
@@ -644,7 +668,8 @@
           const rf = createReflector(reflectors.length + spawnQueue.length);
           spawnQueue.push(rf);
           // Also create a visual transfer beam from Mercury
-          createTransferBeam(rf);
+          // Stagger beams slightly so many are visible when adding in bursts
+          scheduleBeamToReflector(rf, Math.random() * 400);
         }
 
         function commitSpawns(limitPerFrame = 8) {
